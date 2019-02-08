@@ -10,8 +10,11 @@ from baselines.common.mpi_adam import MpiAdam
 from baselines.common.cg import cg
 from baselines.common.input import observation_placeholder
 from baselines.common.policies import build_policy
+from baselines.common.mpi_running_mean_std import RunningMeanStd
 from contextlib import contextmanager
-from baselines.common.exploration import NoveltyReward
+from baselines.common.exploration import AEReward, RNDReward
+
+NOVELTY_REWARDS = {'AE': AEReward, 'RND': RNDReward}
 
 try:
     from mpi4py import MPI
@@ -19,7 +22,6 @@ except ImportError:
     MPI = None
 
 def traj_segment_generator(pi, env, horizon, stochastic):
-    nr = NoveltyReward(env.observation_space)
     # Initialize state variables
     t = 0
     ac = env.action_space.sample()
@@ -47,8 +49,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
         # before returning segment [0, T-1] so we get the correct
         # terminal value
         if t > 0 and t % horizon == 0:
-            bonus = nr.get_batch_bonus_and_update(obs)
-            yield {"ob" : obs, "rew" : rews + bonus, "orig_rew": rews, "vpred" : vpreds, "new" : news,
+            yield {"ob" : obs, "rew" : rews, "vpred" : vpreds, "new" : news,
                     "ac" : acs, "prevac" : prevacs, "nextvpred": vpred * (1 - new),
                     "ep_rets" : ep_rets, "ep_lens" : ep_lens}
             _, vpred, _, _ = pi.step(ob, stochastic=stochastic)
@@ -106,6 +107,8 @@ def learn(*,
         max_episodes=0, max_iters=0,  # time constraint
         callback=None,
         load_path=None,
+        novelty_reward='AE',
+        normalize_int_rew=False,
         **network_kwargs
         ):
     '''
@@ -234,6 +237,8 @@ def learn(*,
     compute_lossandgrad = U.function([ob, ac, atarg], losses + [U.flatgrad(optimgain, var_list)])
     compute_fvp = U.function([flat_tangent, ob, ac, atarg], fvp)
     compute_vflossandgrad = U.function([ob, ret], U.flatgrad(vferr, vf_var_list))
+    rff_rms_int = RunningMeanStd()
+    nr = NOVELTY_REWARDS[novelty_reward](env.observation_space)
 
     @contextmanager
     def timed(msg):
@@ -298,6 +303,15 @@ def learn(*,
 
         with timed("sampling"):
             seg = seg_gen.__next__()
+
+        # Calculate novelty rewards
+        bonus = nr.get_batch_bonus_and_update(seg["ob"])
+        if normalize_int_rew:
+            rff_rms_int.update(bonus.ravel())
+            bonus = bonus / rff_rms_int.std.eval()
+
+        seg["orig_rew"] = seg["rew"]
+        seg["rew"] = seg["rew"] + bonus
         add_vtarg_and_adv(seg, gamma, lam)
 
         # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
