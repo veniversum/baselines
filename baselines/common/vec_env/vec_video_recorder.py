@@ -31,6 +31,7 @@ class VecVideoRecorder(VecEnvWrapper):
         self.file_prefix = "vecenv"
         self.file_infix = '{}'.format(os.getpid())
         self.step_id = 0
+        self.ep_id = 0
         self.video_length = video_length
 
         self.recording = False
@@ -38,19 +39,19 @@ class VecVideoRecorder(VecEnvWrapper):
 
     def reset(self):
         obs = self.venv.reset()
-
-        self.start_video_recorder()
+        self.close_video_recorder()
+        self.ep_id += 1
 
         return obs
 
     def start_video_recorder(self):
         self.close_video_recorder()
 
-        base_path = os.path.join(self.directory, '{}.video.{}.video{:06}'.format(self.file_prefix, self.file_infix, self.step_id))
+        base_path = os.path.join(self.directory, '{}.video.{}.video{:08}'.format(self.file_prefix, self.file_infix, self.ep_id))
         self.video_recorder = video_recorder.VideoRecorder(
                 env=self.venv,
                 base_path=base_path,
-                metadata={'step_id': self.step_id}
+                metadata={'step_id': self.step_id, 'ep_id': self.ep_id}
                 )
 
         self.video_recorder.capture_frame()
@@ -58,7 +59,7 @@ class VecVideoRecorder(VecEnvWrapper):
         self.recording = True
 
     def _video_enabled(self):
-        return self.record_video_trigger(self.step_id)
+        return self.record_video_trigger(self.ep_id)
 
     def step_wait(self):
         obs, rews, dones, infos = self.venv.step_wait()
@@ -68,15 +69,16 @@ class VecVideoRecorder(VecEnvWrapper):
             self.video_recorder.capture_frame()
             self.recorded_frames += 1
             if self.recorded_frames > self.video_length:
-                logger.info("Saving video to ", self.video_recorder.path)
                 self.close_video_recorder()
         elif self._video_enabled():
+                logger.info("Video enabled!")
                 self.start_video_recorder()
 
         return obs, rews, dones, infos
 
     def close_video_recorder(self):
         if self.recording:
+            logger.info("Saving video @ep " + str(self.ep_id) + " to ", self.video_recorder.path)
             self.video_recorder.close()
         self.recording = False
         self.recorded_frames = 0
